@@ -43,8 +43,11 @@ def exa():
 
 
 def jina():
-    o = run('curl -s -m 40 "https://r.jina.ai/https://example.com"')
-    return "Example Domain" in o, f"{len(o)} chars"
+    # example.com asks not to be used for monitoring, and Jina's cache once served a stale fake copy of it,
+    # so read a stable Wikipedia article live (X-No-Cache) and check its own words come back.
+    o = run('curl -s -m 40 -H "X-No-Cache: true" "https://r.jina.ai/https://en.wikipedia.org/wiki/Houseplant"')
+    ok = "Title: Houseplant" in o and "orchid" in o.lower() and len(o) > 3000
+    return ok, f"{len(o)} chars"
 
 
 def amazon():

@@ -67,6 +67,7 @@ Each run finds its test targets fresh (it searches first, then reads what came b
 - **Reddit:** sorting search results by top, new or comments currently returns nothing for logged-out visitors, so the script fetches by relevance and sorts locally. Subreddit feeds sort normally. Whole threads typically come back with 96-100% of the comments Reddit counts; the rest are image-only or deleted. The post's own text comes from the Arctic Shift archive, or from the subreddit's live feed for very new posts.
 - **YouTube:** frames are 320x180, from YouTube's preview sheets. Downloading the video itself fails, because stream addresses are locked to one IP. Rapid back-to-back requests can get throttled; the script waits and retries.
 - **Rate:** the Reddit reader waits about 1.2 seconds between requests. Keep it that way.
+- **Jina reader** can serve an old cached copy of a page; its output then says "cached snapshot". Add `-H "X-No-Cache: true"` to the curl to force a live read.
 - **Free search engines** (You.com, Exa) have daily limits shared with everyone using them anonymously.
 
 ## Rules

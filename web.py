@@ -3,7 +3,7 @@
   python3 web.py you "query"              You.com search, 10 results with long extracts (~100/day)
   python3 web.py exa "query"              Exa search, 5 results with page text
   python3 web.py amazon ASIN              price, stock, rating, star split, "bought in past month", per-topic review summary
-  python3 web.py target "query" [n]       Target search with prices
+  python3 web.py target "query" [n]       Target search with prices (falls back to the Jina reader)
   python3 web.py costco PRODUCT_ID [2]    Costco member reviews, star split; optional 2 = only 1-2 star
   python3 web.py jobs "title" "City, State" [start]   LinkedIn job search, logged out
   python3 web.py job JOB_ID               full LinkedIn posting, logged out
@@ -83,11 +83,30 @@ def amazon(asin):
 
 def target(query, n=5):
     q = urllib.parse.quote(query)
-    d = json.loads(get("https://redsky.target.com/redsky_aggregations/v1/web/plp_search_v2?keyword=" + q + "&channel=WEB&count=" + str(n) +
-        "&default_purchasability_filter=true&page=%2Fs%2F" + q + "&pricing_store_id=3991&visitor_id=0&key=9f36aeafbe60771e321a7cc95a78140772ab3e96"))
-    return [{"tcin": p.get("tcin"), "title": html.unescape(p["item"]["product_description"]["title"]),
-             "price": p.get("price", {}).get("formatted_current_price"), "url": f"https://www.target.com/p/-/A-{p.get('tcin')}"}
-            for p in d["data"]["search"]["products"]]
+    try:  # Target's own search API; since Nov 2026 it often answers this sandbox with a PerimeterX captcha
+        d = json.loads(get("https://redsky.target.com/redsky_aggregations/v1/web/plp_search_v2?keyword=" + q + "&channel=WEB&count=" + str(n) +
+            "&default_purchasability_filter=true&page=%2Fs%2F" + q + "&pricing_store_id=3991&visitor_id=0&key=9f36aeafbe60771e321a7cc95a78140772ab3e96"))
+        return [{"tcin": p.get("tcin"), "title": html.unescape(p["item"]["product_description"]["title"]),
+                 "price": p.get("price", {}).get("formatted_current_price"), "url": f"https://www.target.com/p/-/A-{p.get('tcin')}"}
+                for p in d["data"]["search"]["products"]]
+    except (ValueError, KeyError, urllib.error.HTTPError):
+        pass
+    # Fallback: the public search page as rendered by the Jina reader. Each product card is a markdown link
+    # "[<badges> $price reg$old ... ### Title 4.4 4.44 out of 5 stars ...](.../A-TCIN)".
+    for attempt in range(3):  # the reader sometimes snapshots the page before the product grid renders
+        md = get("https://r.jina.ai/https://www.target.com/s?searchTerm=" + urllib.parse.quote_plus(query))
+        if "### " in md and "/A-" in md: break
+    out, seen = [], set()
+    for card, tcin in re.findall(r"\[([^\[\]]*?### [^\[\]]*?)\]\(https://www\.target\.com/p/[^)]*?/A-(\d+)", md):
+        if tcin in seen: continue
+        seen.add(tcin)
+        pre, title = card.split("### ", 1)
+        title = re.split(r" \d(?:\.\d)? \d\.\d+ out of 5 stars| Only \d+ left| Pickup | Shipping | Delivery | Sponsored$", title)[0]
+        m = re.search(r"\$[\d,]+(?:\.\d\d)?(?: - \$[\d,]+(?:\.\d\d)?)?", pre)
+        out.append({"tcin": tcin, "title": html.unescape(title.strip()), "price": m.group(0) if m else None,
+                    "url": f"https://www.target.com/p/-/A-{tcin}"})
+        if len(out) >= int(n): break
+    return out
 
 def jobs(keywords, location, start=0):
     s = get("https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search?" +

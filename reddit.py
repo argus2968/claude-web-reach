@@ -214,7 +214,15 @@ def search(q, sub=None, sort=None, t=None, pages=1):
     path = (f"/svc/shreddit/r/{sub}/search/" if sub else "/svc/shreddit/search/") + "?" + urllib.parse.urlencode(qs)
     out, ids = [], set()
     for _ in range(pages):
-        res, nxt = parse_search(get(path))
+        try:
+            page = get(path)
+        except SystemExit as e:
+            if "HTTP 403" not in str(e) or out: raise
+            # Since Nov 2026 Reddit often answers logged-out search from cloud IPs with "blocked by network
+            # security" while feeds and threads still work. Find the threads elsewhere instead.
+            out = search_elsewhere(q, sub, t, 25 * pages)
+            break
+        res, nxt = parse_search(page)
         for r in res:
             if r["id"] not in ids: ids.add(r["id"]); out.append(r)
         if not nxt: break
@@ -222,6 +230,74 @@ def search(q, sub=None, sort=None, t=None, pages=1):
     if local:
         out.sort(key=local)
     return out
+
+
+T_SECONDS = {"hour": 3600, "day": 86400, "week": 604800, "month": 2592000, "year": 31536000}
+
+
+def search_elsewhere(q, sub, t, n):
+    """Fallback when Reddit's own search refuses: the Arctic Shift archive for one subreddit (votes and comment
+    counts as archived, usually lower than live), or You.com / Exa web search across all of Reddit."""
+    print("NOTE: Reddit blocked its search for this network; results come from "
+          + ("the Arctic Shift archive (votes as archived, not live)." if sub else "web search (You.com, then Exa; votes only when shown).")
+          + " Threads still read live.", file=sys.stderr)
+    after = int(time.time()) - T_SECONDS[t] if t in T_SECONDS else None
+    out = []
+    if sub:
+        # A time window ("after") makes the archive time out, so ask for the newest 100 matches and filter here.
+        qs = {"subreddit": sub, "query": q, "limit": 100, "sort": "desc",
+              "fields": "id,title,subreddit,score,num_comments,created_utc"}
+        url = "https://arctic-shift.photon-reddit.com/api/posts/search?" + urllib.parse.urlencode(qs)
+        d = {}
+        for wait in (0, 10, 30):
+            time.sleep(wait)
+            try:
+                d = json.load(urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": UA}), timeout=60))
+            except (urllib.error.HTTPError, OSError, ValueError):
+                continue
+            if d.get("data") is not None: break
+        else:
+            print(f"NOTE: the archive didn't answer ({d.get('error') or 'no reply'}); try again in a minute, "
+                  "or drop --sub to search all of Reddit by web search.", file=sys.stderr)
+        for p in d.get("data") or []:
+            if after and p["created_utc"] < after: continue
+            out.append({"id": p["id"], "title": p["title"], "sub": p["subreddit"], "votes": p.get("score"),
+                        "comments": p.get("num_comments"),
+                        "date": time.strftime("%Y-%m-%d", time.gmtime(p["created_utc"])),
+                        "url": f"{BASE}/r/{p['subreddit']}/comments/{p['id']}/"})
+        return out
+    import os
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import web
+    hits = []  # (title, url, date, block text) from You.com, then Exa if You.com gives nothing
+    try:
+        for blk in re.split(r"\n(?=## )", web.you(q + " reddit")):
+            m = re.match(r"## (.*)\n(\S+) \((\d{4}-\d\d-\d\d)?", blk)
+            if m: hits.append((m.group(1), m.group(2), m.group(3) or "", blk))
+    except Exception:
+        pass
+    if not any("/comments/" in h[1] for h in hits):
+        try:
+            for blk in re.split(r"\n(?=Title: )", web.exa(q + " site:reddit.com")):
+                tm, um = re.search(r"Title: (.*)", blk), re.search(r"URL: (\S+)", blk)
+                pm = re.search(r"Published: (\d{4}-\d\d-\d\d)", blk)
+                if tm and um: hits.append((tm.group(1), um.group(1), pm.group(1) if pm else "", blk))
+        except Exception:
+            pass
+    for title, url, date, blk in hits:
+        m = re.match(r"https://(?:www\.|old\.)?reddit\.com(/r/([^/]+)/comments/(\w+)/\S*)", url)
+        if not m or any(r["id"] == m.group(3) for r in out): continue
+        title = re.sub(r"^r/\w+ on Reddit: | : r/\w+$", "", title).strip()
+        pts = re.search(r"([\d,]+) points? · ([\d,]+) comments?", blk)
+        out.append({"id": m.group(3), "title": title, "sub": m.group(2),
+                    "votes": int(pts.group(1).replace(",", "")) if pts else None,
+                    "comments": int(pts.group(2).replace(",", "")) if pts else None,
+                    "date": date, "url": BASE + m.group(1)})
+    recent = [r for r in out if not after or (r["date"] and time.mktime(time.strptime(r["date"], "%Y-%m-%d")) >= after)]
+    if after and out and not recent:
+        print(f"NOTE: none of the {len(out)} threads found are from the last {t}; showing them anyway.", file=sys.stderr)
+        return out
+    return recent
 
 
 def parse_posts(page):
@@ -267,7 +343,8 @@ def main():
         if not res:
             print("0 RESULTS. If the query is common, Reddit may have changed its pages and this script can no longer read them.")
         for r in res:
-            print(f"{r['votes']} votes | {r['comments']} comments | {r['date']} | r/{r['sub']} | {r['title']} | {r['url']}")
+            v, c = ("?" if r[k] is None else r[k] for k in ("votes", "comments"))
+            print(f"{v} votes | {c} comments | {r['date']} | r/{r['sub']} | {r['title']} | {r['url']}")
     elif a.cmd == "posts":
         res = posts(a.sub, a.sort, a.t, a.pages)
         if not res:
